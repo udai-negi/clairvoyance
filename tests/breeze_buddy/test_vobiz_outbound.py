@@ -23,7 +23,9 @@ call never being retried. What is proven here:
 
 Routes run through FastAPI's TestClient at the app's real prefix. Lead and
 template lookups, Smart Router, and the retry / reconcile side effects are
-patched, so nothing here touches Postgres, Redis or a provider.
+patched, so nothing here touches Postgres, Redis or a provider. Plivo
+webhooks must carry X-Plivo-Signature-V3, so Plivo requests here are signed
+the way Plivo signs them.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from app.ai.voice.agents.breeze_buddy.services.telephony.plivo import (
 from app.api.routers.breeze_buddy.telephony import router as telephony_router
 from app.api.routers.breeze_buddy.telephony.answer import handlers as ans_mod
 from app.api.routers.breeze_buddy.telephony.callbacks import handlers as cb_mod
+from tests.telephony_signing import signed_headers, use_test_keys
 
 # app/main.py mounts the breeze_buddy router (which carries telephony) here;
 # Vobiz's answer_url / hangup_url point at this prefix.
@@ -56,6 +59,7 @@ BASE_URL = "https://bb.example.com"
 TEMPLATE_ID = "tmpl-1"
 FROM_NUMBER = "918000000901"
 TO_NUMBER = "919000000001"
+TICKET = "1800000000.test-ticket"
 
 STREAM_ATTRIBUTES = {
     "bidirectional": "true",
@@ -74,7 +78,8 @@ _PLIVO_RECORD = (
 )
 _PLIVO_WS_URL = (
     "        wss://bb.example.com/agent/voice/breeze-buddy/plivo/callback/ws/v2"
-    "?template_id=tmpl-1&amp;from_number=918000000901&amp;to_number=919000000001\n"
+    "?template_id=tmpl-1&amp;from_number=918000000901&amp;to_number=919000000001"
+    "&amp;ticket=1800000000.test-ticket\n"
 )
 RELEASE_PLIVO_XML_NC_OFF = (
     '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -134,18 +139,20 @@ def outbound_call(monkeypatch: pytest.MonkeyPatch, noise_cancellation: bool) -> 
     monkeypatch.setattr(ans_mod, "APP_BASE_URL", BASE_URL)
     monkeypatch.setattr(plivo_recording, "APP_BASE_URL", BASE_URL)
     monkeypatch.setattr(plivo_recording, "PLIVO_RECORDING_TIME_LIMIT", 3600)
+    monkeypatch.setattr(ans_mod, "stream_ticket", lambda *args: TICKET)
+    use_test_keys(monkeypatch, BASE_URL)
 
 
 def answer(client: TestClient, provider: str, call_id: str):
-    return client.post(
-        f"{PREFIX}/{provider}/answer",
-        data={
-            "CallUUID": call_id,
-            "From": FROM_NUMBER,
-            "To": TO_NUMBER,
-            "Direction": "outbound",
-        },
-    )
+    path = f"{PREFIX}/{provider}/answer"
+    data = {
+        "CallUUID": call_id,
+        "From": FROM_NUMBER,
+        "To": TO_NUMBER,
+        "Direction": "outbound",
+    }
+    headers = signed_headers(provider, BASE_URL, path, data)
+    return client.post(path, data=data, headers=headers)
 
 
 # ── /vobiz/answer ────────────────────────────────────────────────────────
@@ -187,7 +194,7 @@ def test_an_outbound_vobiz_answer_is_a_stream_vobiz_can_read(
     assert stream.text == (
         f"wss://bb.example.com{PREFIX}/vobiz/callback/ws/v2"
         f"?template_id={TEMPLATE_ID}&from_number={FROM_NUMBER}"
-        f"&to_number={TO_NUMBER}"
+        f"&to_number={TO_NUMBER}&ticket={TICKET}"
     )
 
 
@@ -321,6 +328,7 @@ def record_downstream(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
     monkeypatch.setattr(cb_mod, "spawn_background_task", spawn)
     monkeypatch.setattr(cb_mod, "get_lead_by_call_id", no_lead)
     monkeypatch.setattr(cb_mod, "handle_unanswered_calls", retry)
+    use_test_keys(monkeypatch, BASE_URL)
     return events
 
 
@@ -400,7 +408,9 @@ def test_the_hangup_callback_feeds_the_shared_status_downstream(
     functions for Plivo and Vobiz; only the status read differs."""
     events = record_downstream(monkeypatch)
 
-    r = client.post(f"{PREFIX}/{provider}/callback/status", data=fields)
+    path = f"{PREFIX}/{provider}/callback/status"
+    headers = signed_headers(provider, BASE_URL, path, fields)
+    r = client.post(path, data=fields, headers=headers)
 
     assert r.status_code == 200
     assert events == expected
@@ -411,14 +421,16 @@ def test_a_vobiz_callback_keys_the_call_on_call_uuid_not_call_sid(client, monkey
     'Parameters Sent to hangup_url'); a stray CallSid must not be used."""
     events = record_downstream(monkeypatch)
 
+    path = f"{PREFIX}/vobiz/callback/status"
     r = client.post(
-        f"{PREFIX}/vobiz/callback/status",
+        path,
         data={
             "CallSid": "decoy",
             "CallUUID": "vz-1",
             "CallStatus": "completed",
             "HangupCauseCode": "3000",
         },
+        headers=signed_headers("vobiz", BASE_URL, path),
     )
 
     assert r.status_code == 200

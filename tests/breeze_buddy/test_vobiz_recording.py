@@ -52,8 +52,10 @@ from app.schemas.breeze_buddy.core import (
     TelephonyNumber,
     TelephonyNumberStatus,
 )
+from tests.telephony_signing import signed_headers, use_test_keys
 
 APP_BASE = "https://bb.example.test"
+TICKET = "1800000000.test-ticket"
 AUTH_ID = "MA_TEST_ID"
 AUTH_TOKEN = "test-token-123"
 CREDS = {"X-Auth-ID": AUTH_ID, "X-Auth-Token": AUTH_TOKEN}
@@ -85,6 +87,8 @@ def vobiz_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(plivo_rec, "APP_BASE_URL", APP_BASE)
     monkeypatch.setattr(plivo_rec, "PLIVO_RECORDING_TIME_LIMIT", 14400)
     monkeypatch.setattr(ans_mod, "APP_BASE_URL", APP_BASE)
+    monkeypatch.setattr(ans_mod, "stream_ticket", lambda *args: TICKET)
+    use_test_keys(monkeypatch, APP_BASE)
 
 
 def set_noise_cancellation(
@@ -262,7 +266,7 @@ async def test_vobiz_answer_records_before_it_streams(monkeypatch, result, templ
     assert stream.text == (
         "wss://bb.example.test/agent/voice/breeze-buddy/vobiz/callback/ws/v2"
         f"?template_id={template_id}&from_number=%2B918000000001"
-        "&to_number=%2B919000000001"
+        f"&to_number=%2B919000000001&ticket={TICKET}"
     )
 
 
@@ -557,7 +561,11 @@ def make_callback(query: str, form: Dict[str, str]) -> Request:
         "method": "POST",
         "path": CALLBACK_PATH,
         "query_string": query.encode(),
-        "headers": [(b"content-type", b"application/x-www-form-urlencoded")],
+        "headers": [(b"content-type", b"application/x-www-form-urlencoded")]
+        + [
+            (k.lower().encode(), v.encode())
+            for k, v in signed_headers("vobiz", APP_BASE, CALLBACK_PATH).items()
+        ],
     }
     return Request(scope, receive)
 

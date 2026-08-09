@@ -15,10 +15,12 @@ from loguru import logger
 from app.ai.voice.agents.breeze_buddy import dispatch as _dispatch  # noqa: F401
 from app.api.routers.breeze_buddy.telephony.callbacks import router
 from app.core.security import jwt as jwt_module
+from tests.telephony_signing import signed_headers, use_test_keys
 
 CALLER = "+919876543210"
 CALLEE = "+14155550123"
 LIGHTHOUSE_SECRET = "lighthouse-test-secret-32-bytes-long!"
+BASE_URL = "https://bb.example.test"
 
 
 @pytest.fixture()
@@ -30,21 +32,19 @@ def logs() -> Iterator[List[str]]:
 
 
 @pytest.fixture()
-def client() -> TestClient:
+def client(monkeypatch) -> TestClient:
+    use_test_keys(monkeypatch, BASE_URL)
     app = FastAPI()
     app.include_router(router)
     return TestClient(app)
 
 
 def test_status_callback_logs_field_names_not_phone_numbers(client, logs):
+    data = {"CallUUID": "CA123", "CallStatus": "ringing", "From": CALLER, "To": CALLEE}
     response = client.post(
-        "/twilio/callback/status",
-        data={
-            "CallSid": "CA123",
-            "CallStatus": "ringing",
-            "From": CALLER,
-            "To": CALLEE,
-        },
+        "/plivo/callback/status",
+        data=data,
+        headers=signed_headers("plivo", BASE_URL, "/plivo/callback/status", data),
     )
 
     assert response.status_code == 200
@@ -54,9 +54,11 @@ def test_status_callback_logs_field_names_not_phone_numbers(client, logs):
 
 
 def test_details_post_logs_field_names_not_phone_numbers(client, logs):
+    data = {"CallUUID": "CA123", "From": CALLER, "To": CALLEE}
     response = client.post(
-        "/twilio/callback/details",
-        data={"CallSid": "CA123", "From": CALLER, "To": CALLEE},
+        "/vobiz/callback/details",
+        data=data,
+        headers=signed_headers("vobiz", BASE_URL, "/vobiz/callback/details"),
     )
 
     assert response.status_code == 200
@@ -65,15 +67,14 @@ def test_details_post_logs_field_names_not_phone_numbers(client, logs):
     assert CALLER not in text and CALLEE not in text
 
 
-def test_details_get_logs_field_names_not_phone_numbers(client, logs):
+def test_details_get_is_gone_and_logs_no_phone_numbers(client, logs):
     response = client.get(
         "/exotel/callback/details",
         params={"CallSid": "CA123", "From": CALLER, "To": CALLEE},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 404
     text = "\n".join(logs)
-    assert "'From'" in text
     assert CALLER not in text and CALLEE not in text
 
 

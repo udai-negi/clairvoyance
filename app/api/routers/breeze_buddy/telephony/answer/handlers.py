@@ -62,6 +62,9 @@ from app.ai.voice.agents.breeze_buddy.services.inbound_policy import (
 from app.ai.voice.agents.breeze_buddy.services.telephony.plivo.recording import (
     plivo_record_xml,
 )
+from app.ai.voice.agents.breeze_buddy.services.telephony.security import (
+    stream_ticket,
+)
 from app.ai.voice.agents.breeze_buddy.services.telephony.vobiz.recording import (
     vobiz_record_xml,
 )
@@ -309,6 +312,11 @@ def _build_websocket_url(
 
     if ivr_mode:
         url += "&ivr_mode=true"
+
+    ticket = stream_ticket(
+        provider, template_id, from_number, to_number, "true" if ivr_mode else ""
+    )
+    url += f"&ticket={ticket}"
 
     return url
 
