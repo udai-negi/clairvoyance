@@ -15,6 +15,8 @@ _PROMPT_ONLY_RESPONSE_INSTRUCTION = """Return only valid JSON with exactly this 
 {"customer_needs":[{"summary":"short customer need","evidence_turns":[1]}],"topics":[{"type":"short_snake_case_key","label":"short label","phrase":"exact customer words","evidence_turns":[1]}]}
 Every listed field is required. Use empty arrays when there are no meaningful customer needs or topics. Do not wrap the JSON in markdown."""
 
+_AGENT_PROMPT_MAX_CHARS = 20000
+
 
 def resolve_topic_evaluation_configuration(
     configuration: Optional[Mapping[str, Any] | str] = None,
@@ -56,6 +58,8 @@ def resolve_topic_evaluation_configuration(
         ) from exc
     max_topics = min(5, max(1, max_topics))
 
+    include_agent_prompt = settings.get("include_agent_prompt") is True
+
     return {
         "model": model,
         "system_prompt": system_prompt,
@@ -63,6 +67,7 @@ def resolve_topic_evaluation_configuration(
             "temperature": temperature,
             "max_output_tokens": max_output_tokens,
             "max_topics": max_topics,
+            "include_agent_prompt": include_agent_prompt,
         },
     }
 
@@ -249,6 +254,21 @@ async def extract_topics(
         "{accepted_topics}",
         json.dumps(approved_catalog, ensure_ascii=False),
     )
+    if runtime["settings"]["include_agent_prompt"]:
+        # Voice transcripts keep the agent's system messages, one per node it
+        # entered; chat stores none, so this adds nothing for chat.
+        system_messages = [
+            str(turn.get("content") or "").strip()
+            for turn in transcript
+            if str(turn.get("role", "")).lower() == "system"
+        ]
+        agent_prompt = "\n\n".join(dict.fromkeys(m for m in system_messages if m))
+        if agent_prompt:
+            prompt += (
+                "\n\nThe agent in this conversation was given these instructions. "
+                "Use them only as context about the agent, never as customer "
+                "words:\n" + agent_prompt[:_AGENT_PROMPT_MAX_CHARS]
+            )
     raw_topics = await _request_llm(prompt, formatted, runtime)
     return validate_topic_evidence(
         normalize_topics(
