@@ -390,6 +390,17 @@ async def get_topic_dashboard_analytics(
         "trends": _format_topic_trend_rows(
             [row for row in rows if row["result_type"] == "trend"], "day"
         ),
+        "all_topics": [
+            {
+                "template_id": row["template_id"],
+                "topic_type": row["topic_type"],
+                "label": row["label"],
+                "rank": row["rank"],
+                "conversation_count": row["conversation_count"],
+            }
+            for row in rows
+            if row["result_type"] == "topic"
+        ],
     }
 
 

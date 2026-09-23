@@ -172,8 +172,23 @@ async def get_topic_dashboard(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     # ponytail: aggregate bounded dashboard rows here; move back to SQL if
     # production result volume makes transfer or memory cost material.
     counts = _topic_counts(topic_rows, filters["date_from"])
-    return _summary_rows(topic_rows, counts, filters["date_from"]) + _trend_rows(
-        topic_rows, counts, filters["date_from"]
+    # Every topic uncapped, so the UI can search past the top 10 in "Other".
+    all_topics = [
+        {
+            "result_type": "topic",
+            "template_id": template_id,
+            "topic_type": topic_type,
+            "label": count["label"],
+            "rank": count["rank"],
+            "conversation_count": len(count["sources"]),
+        }
+        for (template_id, topic_type), count in counts.items()
+    ]
+    all_topics.sort(key=lambda row: (row["template_id"], row["rank"]))
+    return (
+        _summary_rows(topic_rows, counts, filters["date_from"])
+        + _trend_rows(topic_rows, counts, filters["date_from"])
+        + all_topics
     )
 
 
