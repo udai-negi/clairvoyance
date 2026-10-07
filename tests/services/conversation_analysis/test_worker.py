@@ -280,6 +280,7 @@ async def test_chat_context_uses_existing_accessors(
             created_at=now,
             status=ChatSessionStatus.ENDED,
             metadata={},
+            outcome="RESOLVED",
         )
     )
     list_messages = AsyncMock(
@@ -303,6 +304,7 @@ async def test_chat_context_uses_existing_accessors(
     )
 
     assert context and context["transcript"][0]["content"] == "My order is late"
+    assert context["outcome"] == "RESOLVED"
     list_messages.assert_awaited_once_with("session-id")
 
 
@@ -422,7 +424,9 @@ async def test_auto_add_topics_decides_whether_new_labels_join_the_catalog(
     assert save.await_args is not None
     assert save.await_args.args[-1][0]["label"] == "Brand New"
     if appended:
-        catalog_write.assert_awaited_once_with(TEMPLATE_ID, ["Brand New"])
+        catalog_write.assert_awaited_once_with(
+            TEMPLATE_ID, ["Brand New"], flat_only=True
+        )
     else:
         catalog_write.assert_not_awaited()
 

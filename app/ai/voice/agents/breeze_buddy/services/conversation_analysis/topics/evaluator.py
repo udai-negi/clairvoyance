@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.core.logger import logger
 from app.database.accessor.breeze_buddy.evaluation_config import add_discovered_topics
 from app.database.accessor.breeze_buddy.evaluation_result import (
+    replace_topic_result,
     save_evaluation_failure,
     save_evaluation_results,
 )
@@ -18,10 +19,13 @@ from app.schemas.breeze_buddy.evals import EvaluationType
 from app.services.model_provider import ProviderError
 from app.utils.common import parse_json
 
+from .catalog import OUTCOME_DIM, is_two_level, normalize_dims
 from .extractor import (
     TopicFirstTokenTimeout,
     TopicModelResponseError,
+    classify_topic,
     extract_topics,
+    resolve_topic_evaluation_configuration,
 )
 
 _ANALYSIS_TIMEOUT_SECONDS = 240
@@ -108,20 +112,34 @@ async def analyze_topics(
     """
     source_id = context["source_id"]
     model = evaluation.get("model")
+    entries = evaluation.get("topics") or []
+    two_level = is_two_level(entries)
 
     started_at = time.monotonic()
     topics: List[Dict[str, Any]] = []
+    answer: Dict[str, Any] = {}
     for attempt in range(1, _ANALYSIS_MAX_ATTEMPTS + 1):
         attempt_started_at = time.monotonic()
         try:
-            topics = await asyncio.wait_for(
-                extract_topics(
-                    context["transcript"],
-                    evaluation.get("topics") or [],
-                    evaluation.get("configuration"),
-                ),
-                timeout=_ANALYSIS_TIMEOUT_SECONDS,
-            )
+            if two_level:
+                answer = await asyncio.wait_for(
+                    classify_topic(
+                        context["transcript"],
+                        entries,
+                        evaluation.get("configuration"),
+                        context.get("outcome"),
+                    ),
+                    timeout=_ANALYSIS_TIMEOUT_SECONDS,
+                )
+            else:
+                topics = await asyncio.wait_for(
+                    extract_topics(
+                        context["transcript"],
+                        entries,
+                        evaluation.get("configuration"),
+                    ),
+                    timeout=_ANALYSIS_TIMEOUT_SECONDS,
+                )
             break
         except asyncio.CancelledError:
             raise
@@ -168,6 +186,45 @@ async def analyze_topics(
             )
             return failure == MODEL_BAD_RESPONSE
 
+    if two_level:
+        runtime = resolve_topic_evaluation_configuration(
+            evaluation.get("configuration")
+        )
+        answer["dims"] = normalize_dims(
+            context.get("payload") or {}, runtime["breakdowns"]
+        ) | normalize_dims(context, {OUTCOME_DIM: True})
+        customer_lines = [
+            str(turn.get("content") or "").split()
+            for turn in context["transcript"]
+            if str(turn.get("role", "")).lower() == "user"
+            and str(turn.get("content") or "").strip()
+        ]
+        answer["customer_turns"] = len(customer_lines)
+        answer["customer_words"] = sum(len(words) for words in customer_lines)
+        await replace_topic_result(
+            str(evaluation["id"]),
+            EvaluationType.TOPIC.value,
+            context["source_id"],
+            context["reseller_id"],
+            context.get("merchant_id"),
+            str(context["template_id"]),
+            context["started_at"],
+            answer,
+        )
+        logger.bind(
+            outcome="saved",
+            attempts=attempt,
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+            primary=answer["type"],
+            grounded=answer["grounded"],
+            proposed=answer["proposed"],
+            model=model,
+        ).info(
+            f"Topic evaluation {source_id} completed in "
+            f"{time.monotonic() - started_at:.1f}s as {answer['type']}"
+        )
+        return True
+
     await save_evaluation_results(
         str(evaluation["id"]),
         EvaluationType.TOPIC.value,
@@ -188,10 +245,13 @@ async def analyze_topics(
                 .strip()
                 for topic in topics
                 if str(topic.get("label") or "").strip()
+                and "." not in str(topic.get("label"))
             }.values()
         )
         if labels:
-            await add_discovered_topics(str(context["template_id"]), labels)
+            await add_discovered_topics(
+                str(context["template_id"]), labels, flat_only=True
+            )
     logger.bind(
         outcome="saved",
         attempts=attempt,
